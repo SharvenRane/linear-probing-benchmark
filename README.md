@@ -1,93 +1,65 @@
-# Linear Probing Benchmark
+# linear-probing-benchmark
 
-Systematic linear probing and few-shot evaluation suite across SSL pretrained models
+A small suite for evaluating a frozen encoder by linear probing and by few shot probing. The idea is simple. You take a model, freeze its weights, read out the features it produces, and fit a plain linear classifier on top. If the features are good, a linear classifier already separates the classes well. This is the standard way to judge a representation without fine tuning the encoder.
 
-`linear-probing` `evaluation` `benchmark` `self-supervised-learning` `pytorch`
+## What is in here
 
-## Overview
+The code lives under `src/` and breaks into three pieces.
 
-This repository implements a complete pipeline for **linear probing benchmark**, covering
-data preprocessing, model training, evaluation, and deployment.
+`features.py` freezes an encoder and extracts features. Freezing puts every parameter into a no gradient state and switches the module to eval mode so that batch norm and dropout stay still. The forward pass runs under `torch.no_grad`. When the encoder returns a spatial map the output is collapsed with a global average pool, so a convolutional backbone and a flat backbone both hand back one vector per sample.
 
-## Features
+`probe.py` holds the linear probe itself. Features are standardized to zero mean and unit variance, then a logistic regression is fit. The fitted scaler is kept and reused at predict time so train and test go through the same transform. `evaluate_probe` is the one call convenience: fit on a train split, score on a held out split.
 
-- Clean, modular PyTorch implementation
-- Reproducible experiments with MLflow tracking
-- Comprehensive evaluation with standard benchmarks
-- ONNX export for production deployment
-- Detailed documentation and usage examples
+`fewshot.py` is the low label budget path. `sample_k_shot` draws a balanced support set of exactly k examples for every class. `evaluate_k_shot` fits a probe on that support set and scores it, either against an explicit test set you pass in or against the samples that were not chosen as support.
 
-## Installation
-
-```bash
-git clone https://github.com/YOUR_USERNAME/linear-probing-benchmark.git
-cd linear-probing-benchmark
-pip install -r requirements.txt
-```
-
-## Quick Start
+## Quick use
 
 ```python
-from src.model import Model
-from src.trainer import Trainer
-from src.config import Config
+import torch
+from torch import nn
+from src.features import extract_features
+from src.probe import evaluate_probe
+from src.fewshot import evaluate_k_shot
 
-config = Config.from_yaml("configs/default.yaml")
-model = Model(config)
-trainer = Trainer(model, config)
-trainer.train()
+encoder = nn.Sequential(nn.Linear(12, 16), nn.ReLU())
+
+# inputs is a tensor of shape (n, ...), labels is an int array of shape (n,)
+feats, labels = extract_features(encoder, inputs, labels)
+
+# full linear probe on a train/test split
+split = len(labels) // 2
+result = evaluate_probe(feats[:split], labels[:split], feats[split:], labels[split:])
+print(result["accuracy"])
+
+# k shot probe using exactly 5 labelled examples per class
+shot = evaluate_k_shot(feats, labels, k=5)
+print(shot["accuracy"], len(shot["support_indices"]))
 ```
 
-## Project Structure
+The encoder you pass can be anything that maps a batch of inputs to a tensor. It is frozen for you before the forward pass, so you do not need to call `eval` or set `requires_grad` yourself.
+
+## Tests
+
+The test suite uses tiny synthetic tensors and runs on CPU with no downloads. The checks are behavioural rather than fixed numbers:
+
+* a probe reaches high accuracy on linearly separable synthetic features and beats chance on a harder `make_classification` set
+* the scaler and classifier round trip so that `score` matches a manual accuracy count
+* the k shot sampler returns exactly k indices per class, with no repeats, and raises when a class has fewer than k examples
+* feature extraction collapses a spatial encoder output to one vector per sample and leaves the encoder frozen
+* an end to end pass freezes a small encoder, reads features, and runs both the full probe and the k shot probe
+
+Run them with:
 
 ```
-linear-probing-benchmark/
-├── src/
-│   ├── model.py        # Model architecture
-│   ├── dataset.py      # Data loading and preprocessing
-│   ├── trainer.py      # Training loop
-│   ├── evaluate.py     # Evaluation metrics
-│   └── utils.py        # Helper utilities
-├── configs/
-│   └── default.yaml    # Default configuration
-├── notebooks/
-│   └── exploration.ipynb
-├── tests/
-│   └── test_model.py
-├── requirements.txt
-└── README.md
+python -m pytest tests/ -q
 ```
 
-## Results
+On the reference machine all 14 tests pass.
 
-| Model | Dataset | Metric | Score |
-|-------|---------|--------|-------|
-| Baseline | Standard | Primary | - |
-| Ours | Standard | Primary | - |
+## Requirements
 
-## Usage
+See `requirements.txt`. The core dependencies are numpy, torch, and scikit-learn, with pytest for the tests.
 
-```bash
-# Train
-python train.py --config configs/default.yaml
+## A note on results
 
-# Evaluate
-python evaluate.py --checkpoint checkpoints/best.pth
-
-# Export to ONNX
-python export.py --checkpoint checkpoints/best.pth
-```
-
-## References
-
-- Relevant papers and resources for linear probing benchmark
-
-## License
-
-MIT
-
-# update 8
-
-# update 10
-
-# update 12
+This repo does not ship benchmark numbers for any real encoder. It is the harness. Point it at a frozen model and a dataset of your own and it will report the accuracy that run actually produces.
